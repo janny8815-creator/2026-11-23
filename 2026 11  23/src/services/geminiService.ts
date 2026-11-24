@@ -17,7 +17,6 @@ import {
   StructuredAnalysisResult,
 } from '../types/nursing';
 
-const GEMINI_MODEL = 'gemini-3.8-flash';
 const PRIMARY_MODEL = 'gemini-3.8-flash';
 
 /**
@@ -409,63 +408,29 @@ export async function analyzeNursingDraft(
     throw new Error('Gemini API 키가 입력되지 않았습니다. 상단 설정 바에 API 키를 먼저 입력해 주세요.');
   }
 
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
   const systemPrompt = buildSystemPrompt(tab);
   const userPrompt = buildUserPrompt(tab, data);
 
   // 1차 시도: 기본 모델 호출
   let lastAttempt = await callSingleGeminiModel(
     trimmedKey,
-  )}`;
     PRIMARY_MODEL,
     systemPrompt,
     userPrompt,
   );
 
-  let response: Response;
-  try {
-    response = await fetch(endpoint, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        system_instruction: {
-          parts: [{ text: buildSystemPrompt(tab) }],
-        },
-        contents: [
-          {
-            role: 'user',
-            parts: [{ text: buildUserPrompt(tab, data) }],
-          },
-        ],
-        generationConfig: {
-          responseMimeType: 'application/json',
-          temperature: 0.4,
-        },
-      }),
-    });
-  } catch {
   // 키 인증 오류(400/401/403)는 모델 교체가 해결책이 아니므로 즉시 안내
   if (
     !lastAttempt.ok &&
     (lastAttempt.status === 400 || lastAttempt.status === 401 || lastAttempt.status === 403)
   ) {
     throw new Error(
-      '네트워크 연결에 실패했습니다. 인터넷 연결 상태를 확인한 뒤 다시 시도해 주세요.',
       `API 키가 올바르지 않거나 권한이 없습니다. Google AI Studio에서 발급받은 Gemini API 키를 다시 확인해 주세요.${
         lastAttempt.errorDetail ? ` (상세: ${lastAttempt.errorDetail})` : ''
       }`,
     );
   }
 
-  if (!response.ok) {
-    let errorDetail = '';
-    try {
-      const errJson = (await response.json()) as { error?: { message?: string } };
-      errorDetail = errJson?.error?.message ?? '';
-    } catch {
-      // 응답 본문 파싱 실패 무시
   // 2차 시도: 혼잡(503)·한도 초과(429)·미지원(404) 시 사용 가능한 대체 모델 자동 전환
   if (
     !lastAttempt.ok &&
@@ -489,56 +454,25 @@ export async function analyzeNursingDraft(
     }
   }
 
-    if (response.status === 400 || response.status === 401 || response.status === 403) {
   if (!lastAttempt.ok || !lastAttempt.rawText) {
     if (lastAttempt.status === 429) {
       throw new Error(
-        `API 키가 올바르지 않거나 권한이 없습니다. Google AI Studio에서 발급받은 Gemini API 키를 다시 확인해 주세요.${errorDetail ? ` (상세: ${errorDetail})` : ''
-        }`,
         '현재 사용 가능한 모든 모델의 API 호출 한도를 초과했습니다. 약 1분 뒤에 다시 시도해 주세요.',
       );
     }
-
-    if (response.status === 429) {
     if (lastAttempt.status === 503) {
       throw new Error(
-        'API 호출 한도를 초과했습니다. 잠시 후(약 1분 뒤) 다시 시도하거나 API 키 할당량을 확인해 주세요.',
         '현재 Google Gemini 서버(대체 모델 포함)에 일시적으로 요청이 몰려 있습니다. 잠시 후 다시 시도해 주세요.',
       );
     }
-
     throw new Error(
-      `Gemini API 요청 중 오류가 발생했습니다 (HTTP ${response.status}).${errorDetail ? ` ${errorDetail}` : ''
       `Gemini API 요청 중 오류가 발생했습니다 (HTTP ${lastAttempt.status}).${
         lastAttempt.errorDetail ? ` ${lastAttempt.errorDetail}` : ''
       }`,
     );
   }
 
-  let responseJson: {
-    candidates?: Array<{
-      content?: {
-        parts?: Array<{ text?: string }>;
-      };
-    }>;
-  };
   const rawText = lastAttempt.rawText;
-
-  try {
-    responseJson = await response.json();
-  } catch {
-    throw new Error('AI 응답을 읽는 중 오류가 발생했습니다. 다시 시도해 주세요.');
-  }
-
-  const rawText =
-    responseJson.candidates?.[0]?.content?.parts
-      ?.map((p) => p.text ?? '')
-      .join('\n')
-      .trim() ?? '';
-
-  if (!rawText) {
-    throw new Error('AI로부터 빈 응답을 받았습니다. 입력 내용을 조금 더 보완한 뒤 다시 시도해 주세요.');
-  }
 
   const analyzedAt = new Date().toLocaleTimeString('ko-KR', {
     hour: '2-digit',
