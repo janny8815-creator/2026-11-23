@@ -18,6 +18,135 @@ import {
 } from '../types/nursing';
 
 const GEMINI_MODEL = 'gemini-3.8-flash';
+const PRIMARY_MODEL = 'gemini-3.8-flash';
+
+/**
+ * 사용자의 API 키로 현재 호출 가능한 Gemini 모델 목록을 실시간 조회합니다.
+ * - 기본 모델이 혼잡(503)하거나 한도 초과(429)·미지원(404)일 때 대체 모델을 자동으로 찾기 위해 사용합니다.
+ */
+async function fetchAvailableFallbackModels(apiKey: string): Promise<string[]> {
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models?key=${encodeURIComponent(apiKey)}`,
+    );
+    if (!res.ok) return [];
+
+    const json = (await res.json()) as {
+      models?: Array<{
+        name?: string;
+        supportedGenerationMethods?: string[];
+      }>;
+    };
+
+    const models = (json.models ?? [])
+      .filter((m) => {
+        const name = (m.name ?? '').toLowerCase();
+        const methods = m.supportedGenerationMethods ?? [];
+        return (
+          methods.includes('generateContent') &&
+          name.includes('gemini') &&
+          !name.includes('embedding') &&
+          !name.includes('imagen') &&
+          !name.includes('veo') &&
+          !name.includes('tts') &&
+          !name.includes('audio') &&
+          !name.includes('robotics')
+        );
+      })
+      .map((m) => (m.name ?? '').replace(/^models\//, ''))
+      .filter((id) => id && id !== PRIMARY_MODEL);
+
+    // flash-lite / flash / pro 순으로 우선 정렬
+    const scoreModel = (id: string): number => {
+      if (id.includes('flash-lite')) return 1;
+      if (id.includes('flash')) return 2;
+      if (id.includes('pro')) return 3;
+      return 4;
+    };
+
+    return models.sort((a, b) => scoreModel(a) - scoreModel(b)).slice(0, 5);
+  } catch {
+    return [];
+  }
+}
+
+/** 단일 모델로 Gemini API 호출 */
+async function callSingleGeminiModel(
+  apiKey: string,
+  modelId: string,
+  systemPrompt: string,
+  userPrompt: string,
+): Promise<{ ok: boolean; status: number; rawText?: string; errorDetail?: string }> {
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(
+    modelId,
+  )}:generateContent?key=${encodeURIComponent(apiKey)}`;
+
+  let response: Response;
+  try {
+    response = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        system_instruction: {
+          parts: [{ text: systemPrompt }],
+        },
+        contents: [
+          {
+            role: 'user',
+            parts: [{ text: userPrompt }],
+          },
+        ],
+        generationConfig: {
+          responseMimeType: 'application/json',
+          temperature: 0.4,
+        },
+      }),
+    });
+  } catch {
+    throw new Error(
+      '네트워크 연결에 실패했습니다. 인터넷 연결 상태를 확인한 뒤 다시 시도해 주세요.',
+    );
+  }
+
+  if (!response.ok) {
+    let errorDetail = '';
+    try {
+      const errJson = (await response.json()) as { error?: { message?: string } };
+      errorDetail = errJson?.error?.message ?? '';
+    } catch {
+      // 응답 본문 파싱 실패 무시
+    }
+    return { ok: false, status: response.status, errorDetail };
+  }
+
+  let responseJson: {
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{ text?: string }>;
+      };
+    }>;
+  };
+
+  try {
+    responseJson = await response.json();
+  } catch {
+    return { ok: false, status: 500, errorDetail: 'AI 응답 본문 파싱 실패' };
+  }
+
+  const rawText =
+    responseJson.candidates?.[0]?.content?.parts
+      ?.map((p) => p.text ?? '')
+      .join('\n')
+      .trim() ?? '';
+
+  if (!rawText) {
+    return { ok: false, status: 500, errorDetail: 'AI로부터 빈 응답을 받았습니다.' };
+  }
+
+  return { ok: true, status: 200, rawText };
+}
 
 /** Gemini API 호출 공통 시스템 프롬프트 */
 function buildSystemPrompt(tab: ActiveTab): string {
@@ -168,52 +297,52 @@ function normalizeStructuredResult(parsed: unknown): StructuredAnalysisResult | 
 
   const corrections: FeedbackCorrection[] = Array.isArray(obj.corrections)
     ? obj.corrections
-        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-        .map((item): FeedbackCorrection => ({
-          category: String(item.category ?? '일반 피드백'),
-          severity:
-            item.severity === 'high' || item.severity === 'medium' || item.severity === 'low'
-              ? item.severity
-              : 'medium',
-          issue: String(item.issue ?? ''),
-          suggestion: String(item.suggestion ?? ''),
-        }))
-        .filter((item) => item.issue || item.suggestion)
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .map((item): FeedbackCorrection => ({
+        category: String(item.category ?? '일반 피드백'),
+        severity:
+          item.severity === 'high' || item.severity === 'medium' || item.severity === 'low'
+            ? item.severity
+            : 'medium',
+        issue: String(item.issue ?? ''),
+        suggestion: String(item.suggestion ?? ''),
+      }))
+      .filter((item) => item.issue || item.suggestion)
     : [];
 
   const proactiveSuggestions: ProactiveSuggestion[] = Array.isArray(obj.proactiveSuggestions)
     ? obj.proactiveSuggestions
-        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-        .map((item) => ({
-          category: String(item.category ?? '추가 제안'),
-          title: String(item.title ?? '추천 항목'),
-          content: String(item.content ?? ''),
-        }))
-        .filter((item) => item.content)
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .map((item) => ({
+        category: String(item.category ?? '추가 제안'),
+        title: String(item.title ?? '추천 항목'),
+        content: String(item.content ?? ''),
+      }))
+      .filter((item) => item.content)
     : [];
 
   const glossary: GlossaryTerm[] = Array.isArray(obj.glossary)
     ? obj.glossary
-        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-        .map((item) => ({
-          term: String(item.term ?? ''),
-          explanation: String(item.explanation ?? ''),
-        }))
-        .filter((item) => item.term && item.explanation)
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .map((item) => ({
+        term: String(item.term ?? ''),
+        explanation: String(item.explanation ?? ''),
+      }))
+      .filter((item) => item.term && item.explanation)
     : [];
 
   const validStatuses: ChecklistStatus[] = ['complete', 'needs_improvement', 'missing'];
   const checklist: ChecklistItem[] = Array.isArray(obj.checklist)
     ? obj.checklist
-        .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-        .map((item) => ({
-          item: String(item.item ?? ''),
-          status: validStatuses.includes(item.status as ChecklistStatus)
-            ? (item.status as ChecklistStatus)
-            : 'needs_improvement',
-          comment: String(item.comment ?? ''),
-        }))
-        .filter((item) => item.item)
+      .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
+      .map((item) => ({
+        item: String(item.item ?? ''),
+        status: validStatuses.includes(item.status as ChecklistStatus)
+          ? (item.status as ChecklistStatus)
+          : 'needs_improvement',
+        comment: String(item.comment ?? ''),
+      }))
+      .filter((item) => item.item)
     : [];
 
   // 핵심 섹션이 하나도 없으면 구조화 파싱 실패로 간주
@@ -266,6 +395,8 @@ function safeParseJson(rawText: string): StructuredAnalysisResult | null {
 
 /**
  * Gemini API 호출 메인 함수
+ * - 기본 모델(gemini-3.8-flash)이 혼잡(503)·한도 초과(429)·미지원(404)일 경우
+ *   사용자의 API 키로 호출 가능한 다른 Gemini 모델(하위/상위 모델)을 자동으로 찾아 재시도합니다.
  * - 오류 발생 시 사용자에게 명확한 한국어 안내 메시지를 throw 합니다.
  */
 export async function analyzeNursingDraft(
@@ -279,8 +410,17 @@ export async function analyzeNursingDraft(
   }
 
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${encodeURIComponent(
+  const systemPrompt = buildSystemPrompt(tab);
+  const userPrompt = buildUserPrompt(tab, data);
+
+  // 1차 시도: 기본 모델 호출
+  let lastAttempt = await callSingleGeminiModel(
     trimmedKey,
   )}`;
+    PRIMARY_MODEL,
+    systemPrompt,
+    userPrompt,
+  );
 
   let response: Response;
   try {
@@ -306,8 +446,16 @@ export async function analyzeNursingDraft(
       }),
     });
   } catch {
+  // 키 인증 오류(400/401/403)는 모델 교체가 해결책이 아니므로 즉시 안내
+  if (
+    !lastAttempt.ok &&
+    (lastAttempt.status === 400 || lastAttempt.status === 401 || lastAttempt.status === 403)
+  ) {
     throw new Error(
       '네트워크 연결에 실패했습니다. 인터넷 연결 상태를 확인한 뒤 다시 시도해 주세요.',
+      `API 키가 올바르지 않거나 권한이 없습니다. Google AI Studio에서 발급받은 Gemini API 키를 다시 확인해 주세요.${
+        lastAttempt.errorDetail ? ` (상세: ${lastAttempt.errorDetail})` : ''
+      }`,
     );
   }
 
@@ -318,25 +466,51 @@ export async function analyzeNursingDraft(
       errorDetail = errJson?.error?.message ?? '';
     } catch {
       // 응답 본문 파싱 실패 무시
+  // 2차 시도: 혼잡(503)·한도 초과(429)·미지원(404) 시 사용 가능한 대체 모델 자동 전환
+  if (
+    !lastAttempt.ok &&
+    (lastAttempt.status === 503 || lastAttempt.status === 429 || lastAttempt.status === 404)
+  ) {
+    const fallbackModels = await fetchAvailableFallbackModels(trimmedKey);
+    for (const altModel of fallbackModels) {
+      const attempt = await callSingleGeminiModel(
+        trimmedKey,
+        altModel,
+        systemPrompt,
+        userPrompt,
+      );
+      lastAttempt = attempt;
+      if (attempt.ok) {
+        break;
+      }
+      if (attempt.status === 400 || attempt.status === 401 || attempt.status === 403) {
+        break;
+      }
     }
+  }
 
     if (response.status === 400 || response.status === 401 || response.status === 403) {
+  if (!lastAttempt.ok || !lastAttempt.rawText) {
+    if (lastAttempt.status === 429) {
       throw new Error(
-        `API 키가 올바르지 않거나 권한이 없습니다. Google AI Studio에서 발급받은 Gemini API 키를 다시 확인해 주세요.${
-          errorDetail ? ` (상세: ${errorDetail})` : ''
+        `API 키가 올바르지 않거나 권한이 없습니다. Google AI Studio에서 발급받은 Gemini API 키를 다시 확인해 주세요.${errorDetail ? ` (상세: ${errorDetail})` : ''
         }`,
+        '현재 사용 가능한 모든 모델의 API 호출 한도를 초과했습니다. 약 1분 뒤에 다시 시도해 주세요.',
       );
     }
 
     if (response.status === 429) {
+    if (lastAttempt.status === 503) {
       throw new Error(
         'API 호출 한도를 초과했습니다. 잠시 후(약 1분 뒤) 다시 시도하거나 API 키 할당량을 확인해 주세요.',
+        '현재 Google Gemini 서버(대체 모델 포함)에 일시적으로 요청이 몰려 있습니다. 잠시 후 다시 시도해 주세요.',
       );
     }
 
     throw new Error(
-      `Gemini API 요청 중 오류가 발생했습니다 (HTTP ${response.status}).${
-        errorDetail ? ` ${errorDetail}` : ''
+      `Gemini API 요청 중 오류가 발생했습니다 (HTTP ${response.status}).${errorDetail ? ` ${errorDetail}` : ''
+      `Gemini API 요청 중 오류가 발생했습니다 (HTTP ${lastAttempt.status}).${
+        lastAttempt.errorDetail ? ` ${lastAttempt.errorDetail}` : ''
       }`,
     );
   }
@@ -348,6 +522,7 @@ export async function analyzeNursingDraft(
       };
     }>;
   };
+  const rawText = lastAttempt.rawText;
 
   try {
     responseJson = await response.json();
