@@ -17,7 +17,7 @@ import {
   StructuredAnalysisResult,
 } from '../types/nursing';
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.8-flash';
 
 /** Gemini API 호출 공통 시스템 프롬프트 */
 function buildSystemPrompt(tab: ActiveTab): string {
