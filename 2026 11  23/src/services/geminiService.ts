@@ -169,7 +169,7 @@ function normalizeStructuredResult(parsed: unknown): StructuredAnalysisResult | 
   const corrections: FeedbackCorrection[] = Array.isArray(obj.corrections)
     ? obj.corrections
         .filter((item): item is Record<string, unknown> => Boolean(item && typeof item === 'object'))
-        .map((item) => ({
+        .map((item): FeedbackCorrection => ({
           category: String(item.category ?? '일반 피드백'),
           severity:
             item.severity === 'high' || item.severity === 'medium' || item.severity === 'low'
