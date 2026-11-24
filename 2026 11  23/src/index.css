@@ -1,0 +1,38 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    @apply bg-slate-50 text-slate-800;
+  }
+}
+
+/* 인쇄 및 PDF 저장 시 깔끔하게 피드백 결과만 출력되도록 스타일 지정 */
+@media print {
+  .no-print {
+    display: none !important;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #0f172a !important;
+  }
+
+  .print-area {
+    width: 100% !important;
+    max-width: 100% !important;
+    box-shadow: none !important;
+    border: none !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  .print-card {
+    break-inside: avoid;
+    page-break-inside: avoid;
+    border: 1px solid #cbd5e1 !important;
+    box-shadow: none !important;
+    margin-bottom: 12px !important;
+  }
+}
