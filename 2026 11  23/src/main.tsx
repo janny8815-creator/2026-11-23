@@ -8,3 +8,12 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <App />
   </React.StrictMode>,
 );
+
+// PWA 서비스 워커 등록 (홈 화면 앱 설치 및 PWABuilder APK 변환 지원)
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js').catch(() => {
+      // 등록 실패 시에도 앱 동작에는 영향 없음
+    });
+  });
+}
